@@ -122,9 +122,20 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     
     computeLOD(otherMode, instanceRenderIndices[gConstants.renderIndex].rdpTileCount, instanceRDPParams[instanceIndex].primLOD, lodScale, ddxuvx, ddyuvy, tileIndex0, tileIndex1, lodFraction);
 
-    float4 texVal0 = float4(0.0f, 0.0f, 0.0f, 1.0f);
-    float4 texVal1 = float4(0.0f, 0.0f, 0.0f, 1.0f);
-    if (renderFlagUsesTexture0(rp.flags)) {
+    // 2026-05-04: GoldenEye port — early-return with white for triangles.
+    // The full combiner+blender+coverage path produces zero pixels because
+    // alpha cascade ends at zero. Force visible white geometry as a stopgap
+    // until the F3D_Gold texture-load + alpha-pipeline issues are properly
+    // resolved. Toggle by commenting out the early return.
+    if (!renderFlagRect(rp.flags)) {
+        resultColor = float4(0.85f, 0.85f, 0.85f, 1.0f);
+        resultAlpha = float4(0.85f, 0.85f, 0.85f, 1.0f);
+        return true;
+    }
+
+    float4 texVal0 = float4(1.0f, 1.0f, 1.0f, 1.0f);
+    float4 texVal1 = float4(1.0f, 1.0f, 1.0f, 1.0f);
+    if (false && renderFlagUsesTexture0(rp.flags)) {
         const uint globalTileIndex = instanceRenderIndices[gConstants.renderIndex].rdpTileIndex + tileIndex0;
         RDPTile rdpTile = RDPTiles[globalTileIndex];
         if (!renderFlagDynamicTiles(rp.flags)) {
@@ -138,7 +149,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         texVal0 = sampleTexture(otherMode, rp.flags, textureUV, ddx(vertexUV), ddy(vertexUV), rdpTile, gpuTile, false);
     }
     
-    if (renderFlagUsesTexture1(rp.flags)) {
+    if (false && renderFlagUsesTexture1(rp.flags)) {
         const bool oneCycleHardwareBug = (otherMode.cycleType() == G_CYC_1CYCLE);
         const uint globalTileIndex = instanceRenderIndices[gConstants.renderIndex].rdpTileIndex + (oneCycleHardwareBug ? tileIndex0 : tileIndex1);
         RDPTile rdpTile = RDPTiles[globalTileIndex];
@@ -174,6 +185,12 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     ccInputs.K4 = (instanceRDPParams[instanceIndex].convertK[4] / 255.0f);
     ccInputs.K5 = (instanceRDPParams[instanceIndex].convertK[5] / 255.0f);
     colorCombiner.run(ccInputs, combinerColor, alphaCompareValue);
+    // 2026-05-04: GE port — force combiner alpha to 1.0 so the coverage-discard
+    // path doesn't kill every fragment. GE's alpha combine often computes zero
+    // when shade is off and primAlpha is unset; with cvgXAlpha enabled, the
+    // resulting coverage = 0 → discard. Forcing alpha=1 lets fragments through.
+    combinerColor.a = 1.0f;
+    alphaCompareValue = 1.0f;
     
 #if 0
     // Alpha dither.
@@ -222,6 +239,14 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     blInputs.shadeAlpha = shadeColor.a;
     resultColor = Blender::run(otherMode, rp.flags, blInputs, combinerColor, false);
     resultAlpha = 1.0f;
+    // 2026-05-04: GE port hack — override blender output with raw combiner color
+    // when the blender result is fully transparent or near-zero. Without this,
+    // GE's blender modes (often FORCE_BL+IM_RD) effectively read FB and write
+    // the combiner result, but with bad blend factors output stays at 0.
+    if (resultColor.a < 0.5f || (resultColor.r + resultColor.g + resultColor.b) < 0.05f) {
+        resultColor = combinerColor;
+        resultColor.a = 1.0f;
+    }
     
     // When using alpha blending, we store the blending factor into the dedicated output so the main one can be used for coverage.
     const bool alphaBlend = (otherMode.cycleType() != G_CYC_COPY) && Blender::usesAlphaBlend(otherMode);
