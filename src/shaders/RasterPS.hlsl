@@ -226,7 +226,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     const bool usesHDR = renderFlagUsesHDR(rp.flags);
     const float cvgRange = usesHDR ? 65535.0f : 255.0f;
     float resultCvg = (8.0f / cvgRange) * (otherMode.cvgXAlpha() ? combinerColor.a : 1.0f);
-    
+
     // Discard all pixels without coverage.
     const float CoverageThreshold = 1.0f / cvgRange;
     if (resultCvg < CoverageThreshold) {
