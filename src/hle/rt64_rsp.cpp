@@ -205,12 +205,22 @@ namespace RT64 {
                               (std::abs(floatMatrix[3][2]) < 0.5f) && (std::abs(floatMatrix[3][3] - 1.0f) < 0.5f);
             bool affine_col = (std::abs(floatMatrix[0][3]) < 0.5f) && (std::abs(floatMatrix[1][3]) < 0.5f) &&
                               (std::abs(floatMatrix[2][3]) < 0.5f) && (std::abs(floatMatrix[3][3] - 1.0f) < 0.5f);
+            // 2026-05-04: a libultra perspective matrix has m[2][3] ≈ -1, m[3][3] = 0,
+            // and |m[3][2]| > 0 (the -2nf/(n-f) term). Accept transposed layout too
+            // since hlslpp may interpret the storage column-major.
+            bool projection_a = (std::abs(floatMatrix[2][3] + 1.0f) < 0.25f) &&
+                                (std::abs(floatMatrix[3][3]) < 0.25f) &&
+                                (std::abs(floatMatrix[3][2]) > 0.001f);
+            bool projection_b = (std::abs(floatMatrix[3][2] + 1.0f) < 0.25f) &&
+                                (std::abs(floatMatrix[3][3]) < 0.25f) &&
+                                (std::abs(floatMatrix[2][3]) > 0.001f);
+            bool projection = projection_a || projection_b;
             float max_val = 0.0f;
             for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) {
                 float v = std::abs((float)floatMatrix[i][j]);
                 if (v > max_val) max_val = v;
             }
-            if (!affine_row && !affine_col && max_val > 100.0f) {
+            if (!affine_row && !affine_col && !projection && max_val > 100.0f) {
                 static int reject_log = 0;
                 if (++reject_log <= 10) {
                     fprintf(stderr, "[RSP::matrix MALFORMED #%d] addr=0x%08X max=%.1f m[3]=[%.2f %.2f %.2f %.2f]\n",
@@ -1271,6 +1281,40 @@ namespace RT64 {
                 if (otherModeStack[otherModeStackSize - 1].zUpd()) {
                     fbPair.drawDepthRect.merge(drawRect);
                 }
+            }
+        }
+
+        // 2026-05-04: triangle area histogram. Categorize each tri so we can see
+        // how many would actually rasterize visible pixels.
+        static thread_local uint32_t tri_zero_area = 0;
+        static thread_local uint32_t tri_tiny = 0;        // <16 px²
+        static thread_local uint32_t tri_small = 0;       // 16..256 px²
+        static thread_local uint32_t tri_medium = 0;      // 256..4096 px²
+        static thread_local uint32_t tri_large = 0;       // >4096 px²
+        static thread_local uint32_t tri_offscreen = 0;   // bbox outside [0..320]x[0..240]
+        static thread_local uint32_t tri_grand_total = 0;
+        if (visibleTri) {
+            const hlslpp::float3 &p0 = posScreen[globalIndices[0]];
+            const hlslpp::float3 &p1 = posScreen[globalIndices[1]];
+            const hlslpp::float3 &p2 = posScreen[globalIndices[2]];
+            const float ax = p1.x - p0.x, ay = p1.y - p0.y;
+            const float bx = p2.x - p0.x, by = p2.y - p0.y;
+            const float area = std::abs(ax * by - ay * bx) * 0.5f;
+            const float minx = std::min({p0.x, p1.x, p2.x});
+            const float maxx = std::max({p0.x, p1.x, p2.x});
+            const float miny = std::min({p0.y, p1.y, p2.y});
+            const float maxy = std::max({p0.y, p1.y, p2.y});
+            const bool onscreen = (maxx >= 0 && minx <= 320 && maxy >= 0 && miny <= 240);
+            if (!onscreen) tri_offscreen++;
+            else if (area < 1.0f) tri_zero_area++;
+            else if (area < 16.0f) tri_tiny++;
+            else if (area < 256.0f) tri_small++;
+            else if (area < 4096.0f) tri_medium++;
+            else tri_large++;
+            tri_grand_total++;
+            if ((tri_grand_total % 500) == 0) {
+                fprintf(stderr, "[tri histogram total=%u] offscreen=%u zero=%u tiny=%u small=%u medium=%u large=%u\n",
+                    tri_grand_total, tri_offscreen, tri_zero_area, tri_tiny, tri_small, tri_medium, tri_large);
             }
         }
 
