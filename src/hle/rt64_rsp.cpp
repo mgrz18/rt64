@@ -446,6 +446,24 @@ namespace RT64 {
         }
         const Vertex *dlVerts = reinterpret_cast<const Vertex *>(state->fromRDRAM(rdramAddress));
         memcpy(&vertices[dstIndex], dlVerts, sizeof(Vertex) * vtxCount);
+        // 2026-05-04: GE_FORCE_VTX_ALPHA=1 forces all vertex alpha to 255 to test
+        // hypothesis that pixels are being discarded due to alpha=0 in combiner.
+        // Many observed vertices have rgba=(R,G,B,0); with FCxxxxxxxFFxxxxxx
+        // combiner that multiplies by alpha, output ends up zero.
+        if (getenv("GE_FORCE_VTX_ALPHA") != nullptr) {
+            for (uint32_t i = 0; i < vtxCount; i++) {
+                vertices[dstIndex + i].color.a = 0xFF;
+            }
+        }
+        // Optional: GE_FORCE_VTX_RGB=1 forces vertex RGB to white too.
+        if (getenv("GE_FORCE_VTX_RGB") != nullptr) {
+            for (uint32_t i = 0; i < vtxCount; i++) {
+                vertices[dstIndex + i].color.r = 0xFF;
+                vertices[dstIndex + i].color.g = 0xFF;
+                vertices[dstIndex + i].color.b = 0xFF;
+                vertices[dstIndex + i].color.a = 0xFF;
+            }
+        }
         // Debug: dump first few vertex loads to see coord range
         static int vtx_log = 0;
         if (++vtx_log <= 6) {
