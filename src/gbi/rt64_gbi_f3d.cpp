@@ -308,6 +308,11 @@ namespace RT64 {
             const uint8_t siz = (*dl)->p0(19, 2);
             const uint16_t width = (*dl)->p0(0, 12) + 1;
             const uint32_t address = (*dl)->w1;
+            static int sti_log = 0;
+            if (++sti_log <= 20) {
+                fprintf(stderr, "[F3D::setTextureImage #%d raw] w0=0x%08X w1=0x%08X → fmt=%u siz=%u w=%u addr=0x%08X\n",
+                    sti_log, (*dl)->w0, (*dl)->w1, fmt, siz, width, address);
+            }
             state->rsp->setTextureImage(fmt, siz, width, address);
         }
 

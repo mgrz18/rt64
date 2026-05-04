@@ -1158,8 +1158,14 @@ namespace RT64 {
     }
 
     void RSP::setTextureImage(uint8_t fmt, uint8_t siz, uint16_t width, uint32_t segAddress) {
-        uint32_t phys = fromSegmented(segAddress);
-        uint32_t remapped = ge_remap_to_shadow(phys);
+        // 2026-05-04: mask low 3 bits like matrix path — F3D_Gold ucode tolerates
+        // them (DMA hardware truncates) but RT64 needs the aligned address.
+        uint32_t phys = fromSegmented(segAddress) & 0x00FFFFF8;
+        // 2026-05-04: skip shadow remap for textures — textures persist in RAM
+        // longer than the DL stream, and shadow only captures DL build-time
+        // state, so reading texture data from shadow gets stale DL bytes.
+        // Gate via GE_SHADOW_TEXTURES=1 to revert.
+        uint32_t remapped = (getenv("GE_SHADOW_TEXTURES") != nullptr) ? ge_remap_to_shadow(phys) : phys;
         static int ti_log = 0;
         if (++ti_log <= 20) {
             fprintf(stderr, "[setTextureImage #%d] fmt=%u siz=%u w=%u seg=0x%08X phys=0x%08X%s\n",
