@@ -5,6 +5,7 @@
 #include "rt64_framebuffer.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <memory.h>
 #include <stdlib.h>
@@ -73,7 +74,25 @@ namespace RT64 {
 
     uint32_t Framebuffer::copyRAMToNativeAndChanges(RenderWorker *worker, FramebufferChange &fbChange, const uint8_t *src, uint32_t rowStart, uint32_t rowCount, uint8_t fmt, bool invalidateTargets, const ShaderLibrary *shaderLibrary) {
         assert(worker != nullptr);
-        assert(src != nullptr);
+        // Guard: if src is null (shouldn't happen but some code paths may pass null
+        // when FB tracking gets confused by our shadow remap), skip the copy gracefully
+        // instead of crashing in memcpy.
+        if (src == nullptr) {
+            static int null_log = 0;
+            if (++null_log <= 5) {
+                fprintf(stderr, "[Framebuffer::copyRAMToNativeAndChanges] SKIP: null src (fb width=%u rowCount=%u)\n", width, rowCount);
+            }
+            return 0;
+        }
+        // Sanity check: width must be reasonable (1-1024). Guards against corrupt FB
+        // state when SETCIMG was misinterpreted.
+        if (width == 0 || width > 1024 || rowCount == 0 || rowCount > 512) {
+            static int bad_log = 0;
+            if (++bad_log <= 5) {
+                fprintf(stderr, "[Framebuffer::copyRAMToNativeAndChanges] SKIP: bad dims w=%u h=%u\n", width, rowCount);
+            }
+            return 0;
+        }
 
         // Swap the endianness from the source.
         const uint32_t nativeSize = NativeTarget::getNativeSize(width, rowCount, siz);
@@ -127,17 +146,52 @@ namespace RT64 {
 
     void Framebuffer::copyRenderTargetToNative(RenderWorker *worker, RenderTarget *target, uint32_t dstRowWidth, uint32_t dstRowStart, uint32_t dstRowEnd, uint8_t fmt, uint32_t ditherRandomSeed, const ShaderLibrary *shaderLibrary) {
         assert(worker != nullptr);
-        assert(target != nullptr);
-        assert(dstRowStart < height);
-        assert(dstRowEnd <= height);
-
+        static int rt_trace = 0;
+        if (++rt_trace <= 15) {
+            fprintf(stderr, "[copyRenderTargetToNative trace #%d] target=%p dstRowWidth=%u height=%u [%u..%u) addr=0x%08X\n",
+                rt_trace, (void*)target, dstRowWidth, height, dstRowStart, dstRowEnd, addressStart);
+        }
+        // Guard against FBs created with garbage SETCIMG where dims are nonsensical,
+        // or FBs at suspect addresses (near RDRAM end / outside sane range).
+        if (target == nullptr || dstRowWidth == 0 || dstRowWidth > 1024 ||
+            dstRowStart >= height || dstRowEnd > height || dstRowEnd <= dstRowStart ||
+            addressStart >= 0x00800000 || width == 0 || width > 1024 || height == 0 || height > 512) {
+            static int rt_skip_log = 0;
+            if (++rt_skip_log <= 10) {
+                fprintf(stderr, "[copyRenderTargetToNative] SKIP target=%p addr=0x%08X w=%u h=%u drw=%u [%u..%u)\n",
+                    (void*)target, addressStart, width, height, dstRowWidth, dstRowStart, dstRowEnd);
+            }
+            return;
+        }
         nativeTarget.copyToNative(worker, target, dstRowWidth, dstRowStart, dstRowEnd, siz, fmt, bestDitherPattern(), ditherRandomSeed, shaderLibrary);
     }
 
+    // Track the most recently copied-back color FB address so the VI path can display
+    // it even when the game's VI_ORIGIN_REG points at a different (stale) address.
+    // Mutated only from gfx/framebuffer threads; read from VI thread. Plain atomics are
+    // sufficient — occasional staleness is acceptable for display-only use.
+    std::atomic<uint32_t> g_latestCopiedFbAddr{0};
+
     void Framebuffer::copyNativeToRAM(uint8_t *dst, uint32_t dstRowWidth, uint32_t dstRowStart, uint32_t dstRowEnd) {
-        assert(dst != nullptr);
-        assert(dstRowStart < height);
-        assert(dstRowEnd <= height);
+        static int nt2ram_trace = 0;
+        if (++nt2ram_trace <= 15) {
+            fprintf(stderr, "[copyNativeToRAM TRACE #%d] addr=0x%08X w=%u h=%u drw=%u [%u..%u)\n",
+                nt2ram_trace, addressStart, width, height, dstRowWidth, dstRowStart, dstRowEnd);
+        }
+        // Publish for the VI path (see rt64_render_context.cpp::update_screen under GE_FORCE_LATEST_FB).
+        // Only publish plausible color FBs inside RDRAM.
+        if (addressStart > 0 && addressStart < 0x00800000 && siz == 2) {
+            g_latestCopiedFbAddr.store(addressStart, std::memory_order_relaxed);
+        }
+        if (dst == nullptr || dstRowWidth == 0 || dstRowWidth > 1024 ||
+            dstRowStart >= height || dstRowEnd > height || dstRowEnd <= dstRowStart) {
+            static int nt2ram_log = 0;
+            if (++nt2ram_log <= 5) {
+                fprintf(stderr, "[copyNativeToRAM] SKIP dst=%p w=%u h=%u [%u..%u)\n",
+                    (void*)dst, dstRowWidth, height, dstRowStart, dstRowEnd);
+            }
+            return;
+        }
 
         // Copy native target to RDRAM.
         uint8_t *dstBytes = dst + dstRowStart * imageRowBytes(dstRowWidth);

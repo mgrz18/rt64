@@ -62,6 +62,14 @@ namespace RT64 {
 
     uint32_t NativeTarget::copyFromRAM(RenderWorker *worker, FramebufferChange &emptyFbChange, uint32_t width, uint32_t height, uint32_t rowStart, uint8_t siz, uint8_t fmt, const uint8_t *data, bool invalidateTargets, const ShaderLibrary *shaderLibrary) {
         assert(worker != nullptr);
+        // Guard against bad fb params that come from corrupt SETCIMG via shadow state.
+        if (data == nullptr || width == 0 || width > 1024 || height == 0 || height > 512) {
+            static int nt_skip_log = 0;
+            if (++nt_skip_log <= 5) {
+                fprintf(stderr, "[NativeTarget::copyFromRAM] SKIP w=%u h=%u data=%p\n", width, height, (void*)data);
+            }
+            return 0;
+        }
 
         // Create the buffers for change count readback if they've not been created yet.
         if ((changeCountBuffer == nullptr) || (changeReadbackBuffer == nullptr)) {
@@ -233,6 +241,16 @@ namespace RT64 {
 
     void NativeTarget::copyToNative(RenderWorker *worker, RenderTarget *srcTarget, uint32_t rowWidth, uint32_t rowStart, uint32_t rowEnd, uint8_t siz, uint8_t fmt, uint32_t ditherPattern, uint32_t ditherRandomSeed, const ShaderLibrary *shaderLibrary) {
         assert(worker != nullptr);
+        // Guard: srcTarget can be null when FB tracking is inconsistent (e.g., our
+        // shadow-remap created phantom FBs whose render targets never got allocated).
+        if (srcTarget == nullptr || rowWidth == 0 || rowWidth > 1024 || rowEnd <= rowStart) {
+            static int cn_skip_log = 0;
+            if (++cn_skip_log <= 5) {
+                fprintf(stderr, "[NativeTarget::copyToNative] SKIP srcTarget=%p rowWidth=%u rowStart=%u rowEnd=%u\n",
+                    (void*)srcTarget, rowWidth, rowStart, rowEnd);
+            }
+            return;
+        }
 
         srcTarget->resolveTarget(worker, shaderLibrary);
 

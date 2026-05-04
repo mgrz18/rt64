@@ -137,14 +137,30 @@ namespace RT64 {
 
         void vertex(State *state, DisplayList **dl) {
             uint8_t vtxCount = (*dl)->p0(12, 8);
-            state->rsp->setVertex((*dl)->w1, vtxCount, (*dl)->p0(1, 7) - vtxCount);
+            int v0 = (*dl)->p0(1, 7) - vtxCount;
+            static int vc = 0;
+            if (++vc <= 10) {
+                fprintf(stderr, "[F3DEX2 vertex #%d] w0=0x%08X w1=0x%08X count=%u v0=%d addr=0x%08X\n",
+                    vc, (*dl)->w0, (*dl)->w1, vtxCount, v0, (*dl)->w1);
+            }
+            state->rsp->setVertex((*dl)->w1, vtxCount, v0);
         }
 
         void tri1(State *state, DisplayList **dl) {
+            static int ttc = 0;
+            if (++ttc <= 10) {
+                fprintf(stderr, "[F3DEX2 tri1 #%d] w0=0x%08X w1=0x%08X → idx=%u,%u,%u\n",
+                    ttc, (*dl)->w0, (*dl)->w1,
+                    (*dl)->p0(17, 7), (*dl)->p0(9, 7), (*dl)->p0(1, 7));
+            }
             state->rsp->drawIndexedTri((*dl)->p0(17, 7), (*dl)->p0(9, 7), (*dl)->p0(1, 7));
         }
 
         void tri2(State *state, DisplayList **dl) {
+            static int ttc = 0;
+            if (++ttc <= 10) {
+                fprintf(stderr, "[F3DEX2 tri2 #%d] w0=0x%08X w1=0x%08X\n", ttc, (*dl)->w0, (*dl)->w1);
+            }
             state->rsp->drawIndexedTri((*dl)->p0(17, 7), (*dl)->p0(9, 7), (*dl)->p0(1, 7));
             state->rsp->drawIndexedTri((*dl)->p1(17, 7), (*dl)->p1(9, 7), (*dl)->p1(1, 7));
         }

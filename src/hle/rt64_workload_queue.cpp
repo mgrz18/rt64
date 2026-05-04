@@ -291,6 +291,10 @@ namespace RT64 {
         float deltaTimeMs, RenderTargetKey overrideTargetKey, int32_t overrideTargetFbPairIndex, RenderTarget *overrideTarget,
         uint32_t overrideTargetModifier, bool uploadVelocity, bool uploadExtras, bool interpolateTiles)
     {
+        static int render_log = 0;
+        if (++render_log <= 10 || render_log % 60 == 0) {
+            fprintf(stderr, "[threadRenderFrame #%d]\n", render_log);
+        }
 #   if ENABLE_HIGH_RESOLUTION_RENDERER
         std::scoped_lock<std::mutex> managerLock(ext.sharedResources->workloadMutex);
         FramebufferManager &fbManager = ext.sharedResources->framebufferManager;

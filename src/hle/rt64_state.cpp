@@ -525,12 +525,54 @@ namespace RT64 {
             auto &colorImg = fbPair.colorImage;
             auto &depthImg = fbPair.depthImage;
             uint32_t colorHeight = fbPair.drawColorRect.bottom(true);
+            if (getenv("GE_DEEP_SHADOW") != nullptr) {
+                static int fbdiag = 0;
+                if (++fbdiag <= 5) {
+                    const auto &rect = fbPair.drawColorRect;
+                    fprintf(stderr, "[fbPair #%d] rect=[%d,%d..%d,%d] colorAddr=0x%08X siz=%u w=%u "
+                        "calls=%zu prjCount=%d depthRead=%d depthWrite=%d\n",
+                        fbdiag, rect.left(true), rect.top(true), rect.right(true), rect.bottom(true),
+                        colorImg.address, colorImg.siz, colorImg.width,
+                        fbPair.projections.size(), fbPair.projectionCount,
+                        (int)fbPair.depthRead, (int)fbPair.depthWrite);
+                    for (size_t pi = 0; pi < fbPair.projections.size() && pi < 3; ++pi) {
+                        const auto &proj = fbPair.projections[pi];
+                        fprintf(stderr, "  proj#%zu gameCalls=%zu scissor=[%d,%d..%d,%d]\n",
+                            pi, proj.gameCallCount,
+                            proj.scissorRect.left(true), proj.scissorRect.top(true),
+                            proj.scissorRect.right(true), proj.scissorRect.bottom(true));
+                        for (size_t ci = 0; ci < proj.gameCalls.size() && ci < 3; ++ci) {
+                            const auto &gc = proj.gameCalls[ci];
+                            fprintf(stderr, "    call#%zu otherMode=%08X%08X combine=%08X%08X\n",
+                                ci, gc.callDesc.otherMode.H, gc.callDesc.otherMode.L,
+                                gc.callDesc.colorCombiner.L, gc.callDesc.colorCombiner.H);
+                        }
+                    }
+                }
+            }
             uint32_t colorWriteWidth = (colorHeight > 1) ? colorImg.width : std::min(fbPair.drawColorRect.right(true), int32_t(colorImg.width));
             uint32_t depthWriteWidth = 0;
             RT64::Framebuffer *colorFb = &framebufferManager.get(colorImg.address, colorImg.siz, colorImg.width, colorHeight);
             colorImg.formatChanged = colorFb->widthChanged || colorFb->sizChanged || colorFb->rdramChanged;
             colorFb->clearChanged();
             colorFb->addDitherPatterns(fbPair.ditherPatterns);
+            // Mirror registration into sharedResources->framebufferManager so PresentQueue's
+            // fallback has candidates. State's own framebufferManager is not visible to
+            // PresentQueue; the shared one stays empty otherwise. Under GE_DEEP_SHADOW we
+            // eagerly publish each rendered color FB there and stamp a lastWriteTimestamp
+            // so the "most recently written" relaxed fallback in PresentQueue picks it up.
+            if (getenv("GE_DEEP_SHADOW") != nullptr) {
+                RT64::Framebuffer *sharedFb = &ext.sharedQueueResources->framebufferManager.get(
+                    colorImg.address, colorImg.siz, colorImg.width, colorHeight);
+                sharedFb->lastWriteTimestamp = ext.sharedQueueResources->framebufferManager.nextWriteTimestamp();
+                sharedFb->lastWriteType = RT64::Framebuffer::Type::Color;
+                static int pub_log = 0;
+                if (++pub_log <= 10) {
+                    fprintf(stderr, "[State::publishFB #%d] sharedFbMgr.get(0x%08X siz=%u w=%u h=%u) — shared size now %zu\n",
+                        pub_log, colorImg.address, colorImg.siz, colorImg.width, colorHeight,
+                        ext.sharedQueueResources->framebufferManager.framebuffers.size());
+                }
+            }
 
             RT64::Framebuffer *depthFb = nullptr;
             if (fbPair.depthRead || fbPair.depthWrite) {
@@ -737,6 +779,14 @@ namespace RT64 {
     }
     
     void State::fullSync() {
+        static int fs_log = 0;
+        if (++fs_log <= 10 || fs_log % 60 == 0) {
+            // Log with key state to diagnose workload advance
+            int workloadCursor_pre = ext.workloadQueue->writeCursor;
+            Workload &w = ext.workloadQueue->workloads[workloadCursor_pre];
+            fprintf(stderr, "[State::fullSync #%d] triCount=%u fbPairCount=%u workload.writeCursor=%d\n",
+                fs_log, drawCall.triangleCount, w.fbPairCount, workloadCursor_pre);
+        }
         flush();
         submitFramebufferPair(FramebufferPair::FlushReason::ProcessDisplayListsEnd);
 

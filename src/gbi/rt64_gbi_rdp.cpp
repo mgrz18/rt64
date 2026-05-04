@@ -237,6 +237,19 @@ namespace RT64 {
             const int32_t uly = (*dl)->p1(0, 12);
             const int32_t lrx = (*dl)->p0(12, 12);
             const int32_t lry = (*dl)->p0(0, 12);
+            static int log_ctr = 0;
+            if (++log_ctr <= 10) {
+                fprintf(stderr, "[RDP fillRect #%d] ul=(%d,%d) lr=(%d,%d) w0=0x%08X w1=0x%08X\n",
+                    log_ctr, ulx, uly, lrx, lry, (*dl)->w0, (*dl)->w1);
+            }
+            // Diagnostic: if GE_RED_FILLS is set, force fill color to bright red before
+            // each fillrect. If screen turns red, RT64 render-path is functional and our
+            // black-screen issue is specifically about tri pipeline, not fb presentation.
+            if (getenv("GE_RED_FILLS") != nullptr) {
+                // RGBA5551 red = 0xF801 (R=31, G=0, B=0, A=1)
+                // fillColor is 32-bit packed (two 16-bit pixels for 16-bit mode): repeat.
+                state->rdp->setFillColor(0xF801F801u);
+            }
             state->rdp->fillRect(ulx, uly, lrx, lry);
         }
 

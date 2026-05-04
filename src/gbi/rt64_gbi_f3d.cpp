@@ -5,6 +5,8 @@
 #include "rt64_gbi_f3d.h"
 
 #include <cassert>
+#include <unordered_map>
+#include <cstring>
 
 #include "../include/rt64_extended_gbi.h"
 
@@ -15,6 +17,12 @@
 namespace RT64 {
     namespace GBI_F3D {
         void matrix(State *state, DisplayList **dl) {
+            static int mlog = 0;
+            if (++mlog <= 10) {
+                fprintf(stderr, "[F3D::matrix cmd #%d] w0=0x%08X w1=0x%08X (p@16-23=0x%02X p@0-7=0x%02X ofs8-15=0x%02X)\n",
+                    mlog, (*dl)->w0, (*dl)->w1,
+                    (*dl)->p0(16, 8), (*dl)->p0(0, 8), (*dl)->p0(8, 8));
+            }
             state->rsp->matrix((*dl)->w1, (*dl)->p0(16, 8));
         }
 
@@ -74,11 +82,86 @@ namespace RT64 {
         }
 
         void runDl(State *state, DisplayList **dl) {
+            static int rundl_log = 0;
+            if (++rundl_log <= 15) {
+                fprintf(stderr, "[runDl #%d] w0=0x%08X w1=0x%08X\n", rundl_log, (*dl)->w0, (*dl)->w1);
+            }
+
+            uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
+            if (rundl_log <= 15) {
+                fprintf(stderr, "  resolved phys=0x%08X\n", rdramAddress);
+            }
+
+            // Guard: if target is in OS/boot area (< 0x1000) or otherwise suspicious, skip
+            // the G_DL instead of walking into uninitialized memory. Prevents SAFETY_ABORT
+            // when game emits G_DL to sentinel addresses like 0x80000000 (seg 8 = 0 base).
+            if (rdramAddress < 0x1000 || rdramAddress >= 0x00800000) {
+                static int skip_log = 0;
+                if (++skip_log <= 10) {
+                    fprintf(stderr, "[runDl SKIP] bad target w1=0x%08X phys=0x%08X — skipping G_DL\n", (*dl)->w1, rdramAddress);
+                }
+                return;  // Don't advance dl; outer loop will dl++ to next cmd.
+            }
+
             if ((*dl)->p0(16, 1) == 0) {
                 state->pushReturnAddress(*dl);
             }
 
-            const uint32_t rdramAddress = state->rsp->fromSegmentedMasked((*dl)->w1);
+            // GE_LAZY_SHADOW: when G_DL jumps to a game heap address that may have been
+            // overwritten, copy a chunk to a lazy shadow area and redirect. Heuristic:
+            // addresses in the game's typical DL heap range (0x00200000..0x00400000 phys
+            // = 0x80200000..0x80400000 virt). Lazy shadow sits at 0x00700000, 1MB worth
+            // of 16KB chunks (64 chunks). Deduplicate via static map.
+            if (getenv("GE_LAZY_SHADOW") != nullptr) {
+                constexpr uint32_t HEAP_LO = 0x00200000;
+                constexpr uint32_t HEAP_HI = 0x00400000;
+                constexpr uint32_t LAZY_BASE = 0x00700000;
+                constexpr uint32_t LAZY_SIZE = 0x00100000;  // 1MB
+                constexpr uint32_t CHUNK_SIZE = 0x10000;    // 64KB chunks
+                if (rdramAddress >= HEAP_LO && rdramAddress < HEAP_HI) {
+                    static std::unordered_map<uint32_t, uint32_t> shadow_map;
+                    static uint32_t next_slot = 0;
+                    // Align target to chunk to find the chunk containing it.
+                    uint32_t chunk_base = rdramAddress & ~(CHUNK_SIZE - 1);
+                    auto it = shadow_map.find(chunk_base);
+                    uint32_t shadow_chunk;
+                    if (it == shadow_map.end()) {
+                        // Pre-fill entire lazy shadow area with G_ENDDL sentinels on first
+                        // allocation. Walker reading ANYTHING unallocated will hit G_ENDDL
+                        // and pop return stack cleanly instead of walking through zeros.
+                        static bool lazy_initialized = false;
+                        if (!lazy_initialized) {
+                            for (uint32_t off = 0; off < LAZY_SIZE; off += 8) {
+                                *(uint32_t*)(state->RDRAM + LAZY_BASE + off + 0) = 0xB8000000;
+                                *(uint32_t*)(state->RDRAM + LAZY_BASE + off + 4) = 0x00000000;
+                            }
+                            lazy_initialized = true;
+                        }
+                        shadow_chunk = LAZY_BASE + (next_slot * CHUNK_SIZE);
+                        next_slot = (next_slot + 1) % (LAZY_SIZE / CHUNK_SIZE);
+                        memcpy(state->RDRAM + shadow_chunk, state->RDRAM + chunk_base, CHUNK_SIZE);
+                        // Last 256 bytes of chunk become sentinels too (overwrite data, but
+                        // ensures walker stops if it walks past chunk boundary zero regions
+                        // that might coincide with SPNOOP 0x00).
+                        for (uint32_t sentinel_off = CHUNK_SIZE - 256; sentinel_off < CHUNK_SIZE; sentinel_off += 8) {
+                            *(uint32_t*)(state->RDRAM + shadow_chunk + sentinel_off + 0) = 0xB8000000;
+                            *(uint32_t*)(state->RDRAM + shadow_chunk + sentinel_off + 4) = 0x00000000;
+                        }
+                        shadow_map[chunk_base] = shadow_chunk;
+                        static int ls_log = 0;
+                        if (++ls_log <= 10) {
+                            fprintf(stderr, "[lazy_shadow #%d] chunk 0x%08X -> 0x%08X (target was 0x%08X)\n",
+                                ls_log, chunk_base, shadow_chunk, rdramAddress);
+                        }
+                    } else {
+                        shadow_chunk = it->second;
+                    }
+                    // Redirect to shadow equivalent
+                    uint32_t offset_in_chunk = rdramAddress - chunk_base;
+                    rdramAddress = shadow_chunk + offset_in_chunk;
+                }
+            }
+
             *dl = reinterpret_cast<DisplayList *>(state->fromRDRAM(rdramAddress)) - 1;
         }
 
@@ -207,6 +290,11 @@ namespace RT64 {
             const uint8_t siz = (*dl)->p0(19, 2);
             const uint16_t width = (*dl)->p0(0, 12) + 1;
             const uint32_t address = (*dl)->w1;
+            static int log_ctr = 0;
+            if (++log_ctr <= 10) {
+                fprintf(stderr, "[F3D setColorImage #%d] fmt=%u siz=%u width=%u addr=0x%08X\n",
+                    log_ctr, fmt, siz, width, address);
+            }
             state->rsp->setColorImage(fmt, siz, width, address);
         }
 

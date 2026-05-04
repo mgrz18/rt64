@@ -17,6 +17,15 @@
 
 //#define LOG_SPECIAL_MATRIX_OPERATIONS
 
+// Forward decl of global shadow info struct defined in ultramodern/events.cpp.
+struct GE_ShadowInfo {
+    uint32_t src; uint32_t size; uint32_t dest; bool active;
+};
+extern GE_ShadowInfo g_ge_shadow;
+
+// VI_ORIGIN_REG lives at global scope in rt64_render_context.cpp.
+extern unsigned int VI_ORIGIN_REG;
+
 namespace RT64 {
     // RSP
 
@@ -43,13 +52,22 @@ namespace RT64 {
         viewportStackSize = 1;
         geometryModeStackSize = 1;
         otherModeStackSize = 1;
-        modelMatrixStack.fill(hlslpp::float4x4(0.0f));
+        // Initialize matrix stacks with IDENTITY (not zero). GE's ucode never explicitly
+        // sets projection via a SETCIMG-style opcode; it relies on DMEM-resident matrices
+        // pre-uploaded elsewhere. Initializing to zero caused vertex × modelview × ZERO = 0,
+        // collapsing all transformed vertices to origin — invisible on screen.
+        const hlslpp::float4x4 identity = hlslpp::float4x4(
+            1.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 0.0f, 1.0f);
+        modelMatrixStack.fill(identity);
         modelMatrixSegmentedAddressStack.fill(0);
         modelMatrixPhysicalAddressStack.fill(0);
-        viewMatrixStack[0] = hlslpp::float4x4(0.0f);
-        projMatrixStack[0] = hlslpp::float4x4(0.0f);
-        viewProjMatrixStack[0] = hlslpp::float4x4(0.0f);
-        invViewProjMatrixStack[0] = hlslpp::float4x4(0.0f);
+        viewMatrixStack[0] = identity;
+        projMatrixStack[0] = identity;
+        viewProjMatrixStack[0] = identity;
+        invViewProjMatrixStack[0] = identity;
         vertices.fill({});
         indices.fill(0);
         used.reset();
@@ -106,6 +124,15 @@ namespace RT64 {
         return segments[((segAddress) >> 24) & 0x0F] + ((segAddress) & 0x00FFFFFF);
     }
 
+    // Helper to remap a resolved phys address into shadow if it falls in shadow src range.
+    static uint32_t ge_remap_to_shadow(uint32_t phys) {
+        if (getenv("GE_DEEP_SHADOW") != nullptr && g_ge_shadow.active &&
+            phys >= g_ge_shadow.src && phys < g_ge_shadow.src + g_ge_shadow.size) {
+            return g_ge_shadow.dest + (phys - g_ge_shadow.src);
+        }
+        return phys;
+    }
+
     // Converts the given segmented address and then applies the RSP DMA physical address mask.
     // Used in cases where the RSP performs a DMA with a segmented address as the input. 
     uint32_t RSP::fromSegmentedMasked(uint32_t segAddress) {
@@ -118,13 +145,60 @@ namespace RT64 {
 
     void RSP::setSegment(uint32_t seg, uint32_t address) {
         assert(seg < RSP_MAX_SEGMENTS);
+        uint32_t orig_addr = address;
+        // If deep_shadow is active and segment base falls in shadowed range, remap to
+        // shadow equivalent so all segmented-address G_DLs (0x02XXXXXX etc.) resolve
+        // into the shadow copy instead of the game's heap (which may be overwritten).
+        if (getenv("GE_DEEP_SHADOW") != nullptr && g_ge_shadow.active) {
+            // Remap segments 2, 3, 6, 15 (observed DL-carrying segments). Segment 14
+            // is used for RAM base (0x80000000) and should stay. Other segments untouched.
+            bool is_dl_segment = (seg == 2 || seg == 3 || seg == 6 || seg == 15);
+            if (is_dl_segment) {
+                uint32_t phys = address & 0x00FFFFFF;
+                if (phys >= g_ge_shadow.src && phys < g_ge_shadow.src + g_ge_shadow.size) {
+                    address = g_ge_shadow.dest + (phys - g_ge_shadow.src);
+                }
+            }
+        }
+        static int seg_log = 0;
+        if (++seg_log <= 20) {
+            fprintf(stderr, "[RSP::setSegment #%d] seg=%u -> addr=0x%08X%s\n",
+                seg_log, seg, address,
+                (orig_addr != address) ? " (remapped to shadow)" : "");
+        }
         segments[seg] = address;
     }
 
     void RSP::matrix(uint32_t address, uint8_t params) {
-        const uint32_t rdramAddress = fromSegmentedMasked(address);
+        uint32_t rdramAddress = fromSegmentedMasked(address);
+        // 2026-05-04: do NOT shadow-remap matrices. The C-side allocates matrices
+        // separately via osVirtualToPhysical() — they live OUTSIDE the DL stream.
+        // The previous unconditional remap was reading matrix bytes from a stale
+        // DL-stream snapshot, producing garbage values like (60, -28927, 0.003).
+        // Gate via GE_SHADOW_MATRICES=1 if you ever need the old behavior back.
+        if (getenv("GE_SHADOW_MATRICES") != nullptr) {
+            rdramAddress = ge_remap_to_shadow(rdramAddress);
+        }
+        // Experiment: if GE_LOCK_MATRICES is set, only accept matrix loads from our
+        // injection region (0x007F0000-0x007F01FF). Silently drop every other mtx cmd
+        // so the game's own (broken) matrices don't overwrite our good ortho+identity.
+        if (getenv("GE_LOCK_MATRICES") != nullptr &&
+            (rdramAddress < 0x007F0000 || rdramAddress > 0x007F01FF)) {
+            return;
+        }
         const FixedMatrix *fixedMatrix = reinterpret_cast<FixedMatrix *>(state->fromRDRAM(rdramAddress));
         const hlslpp::float4x4 floatMatrix = fixedMatrix->toMatrix4x4();
+        // Debug dump: first few matrix loads with decoded values
+        static int mtx_log = 0;
+        if (++mtx_log <= 8) {
+            fprintf(stderr, "[RSP::matrix #%d] seg=0x%08X phys=0x%08X params=0x%02X\n",
+                mtx_log, address, rdramAddress, params);
+            fprintf(stderr, "  decoded: [%f %f %f %f / %f %f %f %f / %f %f %f %f / %f %f %f %f]\n",
+                (double)floatMatrix[0][0], (double)floatMatrix[0][1], (double)floatMatrix[0][2], (double)floatMatrix[0][3],
+                (double)floatMatrix[1][0], (double)floatMatrix[1][1], (double)floatMatrix[1][2], (double)floatMatrix[1][3],
+                (double)floatMatrix[2][0], (double)floatMatrix[2][1], (double)floatMatrix[2][2], (double)floatMatrix[2][3],
+                (double)floatMatrix[3][0], (double)floatMatrix[3][1], (double)floatMatrix[3][2], (double)floatMatrix[3][3]);
+        }
 
         // Projection matrix.
         hlslpp::float4x4 &viewMatrix = viewMatrixStack[projectionMatrixStackSize - 1];
@@ -316,9 +390,25 @@ namespace RT64 {
             return;
         }
 
-        const uint32_t rdramAddress = fromSegmentedMasked(address);
+        uint32_t rdramAddress = fromSegmentedMasked(address);
+        // Optional shadow remap for vertex data. Controlled by GE_REMAP_VTX env var
+        // because vertex data may live in a different region than matrix/texture data.
+        if (getenv("GE_REMAP_VTX") != nullptr) {
+            rdramAddress = ge_remap_to_shadow(rdramAddress);
+        }
         const Vertex *dlVerts = reinterpret_cast<const Vertex *>(state->fromRDRAM(rdramAddress));
         memcpy(&vertices[dstIndex], dlVerts, sizeof(Vertex) * vtxCount);
+        // Debug: dump first few vertex loads to see coord range
+        static int vtx_log = 0;
+        if (++vtx_log <= 6) {
+            fprintf(stderr, "[RSP::setVertex #%d] seg=0x%08X phys=0x%08X n=%u dst=%u\n",
+                vtx_log, address, rdramAddress, vtxCount, dstIndex);
+            for (uint32_t i = 0; i < vtxCount && i < 4; ++i) {
+                const Vertex &v = vertices[dstIndex + i];
+                fprintf(stderr, "  v[%u]: pos=(%d,%d,%d) st=(%d,%d) rgba=(%u,%u,%u,%u)\n",
+                    i, v.x, v.y, v.z, v.s, v.t, v.color.r, v.color.g, v.color.b, v.color.a);
+            }
+        }
         setVertexCommon<true>(dstIndex, dstIndex + vtxCount);
     }
     
@@ -610,6 +700,17 @@ namespace RT64 {
             }
         }
 
+        static int transform_log = 0;
+        if (++transform_log <= 3) {
+            fprintf(stderr, "[setVertexCommon xform #%d] MVP=[%.6f %.6f %.6f %.6f / %.6f %.6f %.6f %.6f / %.6f %.6f %.6f %.6f / %.6f %.6f %.6f %.6f] vp.scale=(%.2f,%.2f,%.2f) vp.trans=(%.2f,%.2f,%.2f)\n",
+                transform_log,
+                (double)mvp[0][0], (double)mvp[0][1], (double)mvp[0][2], (double)mvp[0][3],
+                (double)mvp[1][0], (double)mvp[1][1], (double)mvp[1][2], (double)mvp[1][3],
+                (double)mvp[2][0], (double)mvp[2][1], (double)mvp[2][2], (double)mvp[2][3],
+                (double)mvp[3][0], (double)mvp[3][1], (double)mvp[3][2], (double)mvp[3][3],
+                (double)viewportStack[viewportStackSize-1].scale.x, (double)viewportStack[viewportStackSize-1].scale.y, (double)viewportStack[viewportStackSize-1].scale.z,
+                (double)viewportStack[viewportStackSize-1].translate.x, (double)viewportStack[viewportStackSize-1].translate.y, (double)viewportStack[viewportStackSize-1].translate.z);
+        }
         for (uint32_t i = dstIndex; i < dstMax; i++) {
             auto &v = vertices[i];
             const hlslpp::float4 tfPos = hlslpp::mul(hlslpp::float4(v.x, v.y, v.z, 1.0f), mvp);
@@ -801,6 +902,11 @@ namespace RT64 {
     
     void RSP::setViewport(uint32_t address, uint16_t ori, int16_t offx, int16_t offy) {
         const uint32_t rdramAddress = fromSegmentedMasked(address);
+        // Experiment: if GE_LOCK_MATRICES is set, also lock viewport to our injection.
+        if (getenv("GE_LOCK_MATRICES") != nullptr &&
+            (rdramAddress < 0x007F0000 || rdramAddress > 0x007F01FF)) {
+            return;
+        }
         const Vp_t *vp = reinterpret_cast<const Vp_t *>(state->fromRDRAM(rdramAddress));
         interop::RSPViewport &viewport = viewportStack[viewportStackSize - 1];
         viewport.scale.x = float(vp->vscale[1]) / 4.0f;
@@ -811,6 +917,15 @@ namespace RT64 {
         viewport.translate.z = float(vp->vtrans[3]) / DepthRange;
         extended.viewportOrigin = ori;
         viewportChanged = true;
+        static int vp_log = 0;
+        if (++vp_log <= 10) {
+            fprintf(stderr, "[RSP::setViewport #%d] seg=0x%08X phys=0x%08X raw_scale=(%d,%d,%d,%d) raw_trans=(%d,%d,%d,%d) -> scale=(%.2f,%.2f,%.2f) trans=(%.2f,%.2f,%.2f)\n",
+                vp_log, address, rdramAddress,
+                vp->vscale[0], vp->vscale[1], vp->vscale[2], vp->vscale[3],
+                vp->vtrans[0], vp->vtrans[1], vp->vtrans[2], vp->vtrans[3],
+                (double)viewport.scale.x, (double)viewport.scale.y, (double)viewport.scale.z,
+                (double)viewport.translate.x, (double)viewport.translate.y, (double)viewport.translate.z);
+        }
     }
 
     void RSP::pushViewport() {
@@ -928,7 +1043,48 @@ namespace RT64 {
     }
 
     void RSP::setColorImage(uint8_t fmt, uint8_t siz, uint16_t width, uint32_t segAddress) {
-        state->rdp->setColorImage(fmt, siz, width, fromSegmented(segAddress));
+        uint32_t phys = fromSegmented(segAddress);
+        // Experiment: if GE_FORCE_FB_VI_ORIGIN is set, ALWAYS rewrite CIMG to use the
+        // current VI_ORIGIN (the address the VI will display), 320×240 RGBA16. This
+        // makes RT64 track framebuffer at the address VI is actually showing, so
+        // present can find it.
+        // Under GE_DEEP_SHADOW, rewrite every SETCIMG to point at the CURRENT VI_ORIGIN.
+        // This makes RT64 render to the same FB the VI will display. Without this, game
+        // tracks FBs at garbage SETCIMG addresses (0x00FFFEFF etc.) while VI shows
+        // 0x00026100 — no overlap, nothing visible.
+        if (getenv("GE_DEEP_SHADOW") != nullptr) {
+            uint32_t safe_phys = VI_ORIGIN_REG & 0x00FFFFFF;
+            if (safe_phys == 0 || safe_phys >= 0x00800000) safe_phys = 0x00026100;
+            static int ci_log2 = 0;
+            if (++ci_log2 <= 10) {
+                fprintf(stderr, "[setColorImage VI-SYNC #%d] game fmt=%u siz=%u w=%u addr=0x%08X -> fmt=0 siz=2 w=320 addr=0x%08X\n",
+                    ci_log2, fmt, siz, width, phys, safe_phys);
+            }
+            fmt = 0; siz = 2; width = 320; phys = safe_phys;
+        }
+        else if (getenv("GE_FORCE_FB_VI_ORIGIN") != nullptr) {
+            // Observed VI origin addresses: 0x00026100 (primary in-game FB),
+            // 0x003DAA80, 0x003B5280, 0x00000900 (early boot). Use 0x00026100 as default.
+            uint32_t safe_phys = 0x00026100;
+            if (safe_phys == 0 || safe_phys >= 0x00800000) safe_phys = 0x00026100;
+            static int ci_log = 0;
+            if (++ci_log <= 10) {
+                fprintf(stderr, "[RSP::setColorImage FORCE_VI #%d] game fmt=%u siz=%u w=%u addr=0x%08X -> forcing fmt=0 siz=2 w=320 addr=0x%08X\n",
+                    ci_log, fmt, siz, width, phys, safe_phys);
+            }
+            fmt = 0; siz = 2; width = 320; phys = safe_phys;
+        }
+        else if (getenv("GE_LOCK_MATRICES") != nullptr &&
+            (width <= 1 || width > 640 || phys >= 0x00800000)) {
+            static int ci_log = 0;
+            uint32_t safe_phys = 0x00026100;
+            if (++ci_log <= 10) {
+                fprintf(stderr, "[RSP::setColorImage OVERRIDE #%d] game_sent fmt=%u siz=%u width=%u addr=0x%08X -> forcing fmt=0 siz=2 width=320 addr=0x%08X\n",
+                    ci_log, fmt, siz, width, phys, safe_phys);
+            }
+            fmt = 0; siz = 2; width = 320; phys = safe_phys;
+        }
+        state->rdp->setColorImage(fmt, siz, width, phys);
     }
 
     void RSP::setDepthImage(uint32_t segAddress) {
@@ -936,10 +1092,22 @@ namespace RT64 {
     }
 
     void RSP::setTextureImage(uint8_t fmt, uint8_t siz, uint16_t width, uint32_t segAddress) {
-        state->rdp->setTextureImage(fmt, siz, width, fromSegmented(segAddress));
+        uint32_t phys = fromSegmented(segAddress);
+        uint32_t remapped = ge_remap_to_shadow(phys);
+        static int ti_log = 0;
+        if (++ti_log <= 20) {
+            fprintf(stderr, "[setTextureImage #%d] fmt=%u siz=%u w=%u seg=0x%08X phys=0x%08X%s\n",
+                ti_log, fmt, siz, width, segAddress, remapped,
+                remapped != phys ? " (remapped)" : "");
+        }
+        state->rdp->setTextureImage(fmt, siz, width, remapped);
     }
 
     void RSP::drawIndexedTri(uint32_t a, uint32_t b, uint32_t c, bool rawGlobalIndices) {
+        static uint32_t tri_count = 0;
+        static uint32_t tri_culled = 0;
+        tri_count++;
+
         // Copy mode is not supported when drawing regular tris and crashes the hardware.
         const uint32_t cycleType = state->rdp->otherMode.cycleType();
         assert(cycleType != G_CYC_COPY);
@@ -947,7 +1115,14 @@ namespace RT64 {
         // Don't draw anything if both tris are being culled.
         const uint32_t &geometryMode = geometryModeStack[geometryModeStackSize - 1];
         if ((geometryMode & cullBothMask) == cullBothMask) {
+            tri_culled++;
             return;
+        }
+
+        // Log total counts periodically so we can see cull ratio.
+        if ((tri_count % 100) == 0) {
+            fprintf(stderr, "[drawIndexedTri stats] total=%u culled=%u drawn=%u\n",
+                tri_count, tri_culled, tri_count - tri_culled);
         }
         
         state->rdp->checkFramebufferPair();
@@ -1025,6 +1200,18 @@ namespace RT64 {
             const hlslpp::float3 V = posScreen[globalIndices[2]] - posScreen[globalIndices[0]];
             const hlslpp::float3 N = hlslpp::cross(V, U);
             visibleTri = (N.z >= 0.0f);
+        }
+        // Debug: dump final screen-space coords of first 20 tris
+        static int tri_dump = 0;
+        if (++tri_dump <= 20) {
+            const hlslpp::float3 &v0 = posScreen[globalIndices[0]];
+            const hlslpp::float3 &v1 = posScreen[globalIndices[1]];
+            const hlslpp::float3 &v2 = posScreen[globalIndices[2]];
+            fprintf(stderr, "[drawTri #%d] visible=%d v0=(%.1f,%.1f,%.3f) v1=(%.1f,%.1f,%.3f) v2=(%.1f,%.1f,%.3f)\n",
+                tri_dump, visibleTri,
+                (double)v0.x, (double)v0.y, (double)v0.z,
+                (double)v1.x, (double)v1.y, (double)v1.z,
+                (double)v2.x, (double)v2.y, (double)v2.z);
         }
 
         const FixedRect &scissorRect = state->rdp->scissorRectStack[state->rdp->scissorStackSize - 1];

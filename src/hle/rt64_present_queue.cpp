@@ -36,6 +36,10 @@ namespace RT64 {
     }
 
     void PresentQueue::advanceToNextPresent() {
+        static int adv_log = 0;
+        if (++adv_log <= 30 || adv_log % 60 == 0) {
+            fprintf(stderr, "[PresentQueue::advance #%d] wc=%d -> %d\n", adv_log, writeCursor, (writeCursor + 1) % (int)presents.size());
+        }
         int nextWriteCursor = (writeCursor + 1) % presents.size();
 
         // Stall the thread until the barrier is lifted if we're trying to write on a present being used by the GPU.
@@ -140,6 +144,61 @@ namespace RT64 {
             Framebuffer *viFb = nullptr;
             if (!viewRDRAM) {
                 viFb = fbManager.find(present.screenVI.fbAddress());
+            }
+
+            // GE_DEEP_SHADOW fallback: if VI's FB not found OR has empty content,
+            // pick the most recently written FB with matching dims. Bridges the
+            // double-buffering race where game's VI swap pointer is different from
+            // the address where RT64 just rendered.
+            if (getenv("GE_DEEP_SHADOW") != nullptr && viFb == nullptr) {
+                Framebuffer *bestFb = nullptr;
+                uint64_t bestTs = 0;
+                uint32_t viW = present.screenVI.fbSize().x;
+                uint8_t viSiz = present.screenVI.fbSiz();
+                static int fallback_log = 0;
+                bool do_log = (++fallback_log <= 10);
+                if (do_log) {
+                    fprintf(stderr, "[PresentQueue FB fallback #%d] VI addr=0x%08X viW=%u viSiz=%u — candidates:\n",
+                        fallback_log, present.screenVI.fbAddress(), viW, viSiz);
+                }
+                // First pass: strict (type=Color + matching dims)
+                for (auto &pair : fbManager.framebuffers) {
+                    Framebuffer &fb = pair.second;
+                    if (do_log) {
+                        fprintf(stderr, "  fb addr=0x%08X w=%u siz=%u type=%d ts=%llu\n",
+                            fb.addressStart, fb.width, fb.siz, (int)fb.lastWriteType,
+                            (unsigned long long)fb.lastWriteTimestamp);
+                    }
+                    if (fb.lastWriteTimestamp > bestTs &&
+                        fb.lastWriteType == Framebuffer::Type::Color &&
+                        fb.width == viW && fb.siz == viSiz) {
+                        bestTs = fb.lastWriteTimestamp;
+                        bestFb = &fb;
+                    }
+                }
+                // Second pass (relaxed): ignore type/dims, just pick most-recently-written
+                // color-like FB. This unblocks the case where the game-tracked FB has
+                // different metadata than the VI expects.
+                if (bestFb == nullptr) {
+                    for (auto &pair : fbManager.framebuffers) {
+                        Framebuffer &fb = pair.second;
+                        if (fb.lastWriteTimestamp > bestTs) {
+                            bestTs = fb.lastWriteTimestamp;
+                            bestFb = &fb;
+                        }
+                    }
+                    if (do_log && bestFb != nullptr) {
+                        fprintf(stderr, "  -> RELAXED pick: 0x%08X w=%u siz=%u type=%d ts=%llu\n",
+                            bestFb->addressStart, bestFb->width, bestFb->siz,
+                            (int)bestFb->lastWriteType, (unsigned long long)bestTs);
+                    }
+                } else if (do_log) {
+                    fprintf(stderr, "  -> STRICT pick: 0x%08X ts=%llu\n",
+                        bestFb->addressStart, (unsigned long long)bestTs);
+                }
+                if (bestFb != nullptr) {
+                    viFb = bestFb;
+                }
             }
 
             Framebuffer *presentFb = viFb;

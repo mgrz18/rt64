@@ -31,6 +31,24 @@ namespace RT64 {
     FramebufferManager::~FramebufferManager() { }
     
     Framebuffer &FramebufferManager::get(uint32_t address, uint8_t siz, uint32_t width, uint32_t height) {
+        static int get_log = 0;
+        // Guard against FBs at shadow-region addresses (0x00500000-0x00800000). These
+        // happen when game emits SETCIMG with segmented addr that our shadow-remap
+        // redirects into shadow space. Shadow region holds DL data not real framebuffers,
+        // so creating FB objects for those addresses leads to crashes in copy paths.
+        // Redirect to a safe dummy address that won't collide.
+        if (getenv("GE_DEEP_SHADOW") != nullptr &&
+            address >= 0x00500000 && address < 0x00800000) {
+            static int redir_log = 0;
+            if (++redir_log <= 10) {
+                fprintf(stderr, "[FbManager::get REDIRECT] addr=0x%08X (shadow) -> dummy 0x007E0000\n", address);
+            }
+            address = 0x007E0000;  // tiny area near end of RDRAM we don't use
+        }
+        bool is_new = (framebuffers.find(address) == framebuffers.end());
+        if (is_new && ++get_log <= 15) {
+            fprintf(stderr, "[FbManager::get #%d NEW] addr=0x%08X siz=%u w=%u h=%u\n", get_log, address, siz, width, height);
+        }
         auto &fb = framebuffers[address];
         fb.widthChanged = (fb.width != width);
         fb.sizChanged = (fb.siz != siz);

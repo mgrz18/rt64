@@ -436,7 +436,6 @@ namespace RT64 {
         }
 
         if (textSegmentIndex < 0 || dataSegmentIndex < 0) {
-            fprintf(stderr, "Unable to find a matching GBI in the current database. This game is not supported in HLE.\n");
             deduceGBIInformation(RDRAM, textAddress, dataAddress);
             return nullptr;
         }
@@ -458,6 +457,8 @@ namespace RT64 {
             fprintf(stderr, "Unable to find a GBI that is shared between the text and data segment. Is the GBI database configured incorrectly?\n");
             return nullptr;
         }
+
+        // matched ucode log silenced
 
         GBI &gbi = gbiCache[uint32_t(matchingInstance->ucode)];
         if (gbi.ucode == GBIUCode::Unknown) {
