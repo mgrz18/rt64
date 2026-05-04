@@ -122,14 +122,20 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     
     computeLOD(otherMode, instanceRenderIndices[gConstants.renderIndex].rdpTileCount, instanceRDPParams[instanceIndex].primLOD, lodScale, ddxuvx, ddyuvy, tileIndex0, tileIndex1, lodFraction);
 
-    // 2026-05-04: GoldenEye port — early-return with white for triangles.
-    // The full combiner+blender+coverage path produces zero pixels because
-    // alpha cascade ends at zero. Force visible white geometry as a stopgap
-    // until the F3D_Gold texture-load + alpha-pipeline issues are properly
-    // resolved. Toggle by commenting out the early return.
+    // 2026-05-04: GoldenEye port — early-return for non-rect tris.
+    // Mix vertex shade with a depth-derived gray so we get some scene
+    // structure visible (closer = brighter). Bypasses combiner+blender+
+    // coverage which otherwise discards every fragment due to GE's
+    // alpha-cascade ending at zero.
     if (!renderFlagRect(rp.flags)) {
-        resultColor = float4(0.85f, 0.85f, 0.85f, 1.0f);
-        resultAlpha = float4(0.85f, 0.85f, 0.85f, 1.0f);
+        float depth = saturate(1.0f - vertexPosition.z);
+        float3 base = float3(0.5f + 0.5f * depth, 0.5f + 0.5f * depth, 0.5f + 0.5f * depth);
+        float3 shade = vertexSmoothColor.rgb;
+        // Blend shade only if it has any nonzero component.
+        float shadeStrength = saturate(shade.r + shade.g + shade.b);
+        float3 c = lerp(base, shade, shadeStrength);
+        resultColor = float4(c, 1.0f);
+        resultAlpha = float4(c, 1.0f);
         return true;
     }
 
