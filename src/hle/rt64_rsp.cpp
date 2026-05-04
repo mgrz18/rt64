@@ -5,6 +5,7 @@
 #include "rt64_rsp.h"
 
 #include <cassert>
+#include <cmath>
 
 #include "../include/rt64_extended_gbi.h"
 #include "common/rt64_common.h"
@@ -188,26 +189,53 @@ namespace RT64 {
         }
         const FixedMatrix *fixedMatrix = reinterpret_cast<FixedMatrix *>(state->fromRDRAM(rdramAddress));
         const hlslpp::float4x4 floatMatrix = fixedMatrix->toMatrix4x4();
+
+        // 2026-05-04: Heuristic-reject matrices that don't look like valid affine
+        // transforms or projections. GE's DL contains gSPMatrix-equivalent commands
+        // whose w1 sometimes points to non-matrix data (DL chunks in g_GfxMemPos heap).
+        // Reading 64 bytes of those as Mtx produces gibberish that explodes vertex
+        // transforms (NaN/inf coords, billions of pixels off-screen).
+        //
+        // Valid matrix sanity: a libultra Mtx is either affine (last row [0,0,0,1])
+        // or a projection (last col [0,0,0,1] in column-major hlslpp). If neither,
+        // and any value is unreasonably large, drop the load.
+        // Gate via GE_NO_MTX_FILTER=1 to disable.
+        if (getenv("GE_NO_MTX_FILTER") == nullptr) {
+            bool affine_row = (std::abs(floatMatrix[3][0]) < 0.5f) && (std::abs(floatMatrix[3][1]) < 0.5f) &&
+                              (std::abs(floatMatrix[3][2]) < 0.5f) && (std::abs(floatMatrix[3][3] - 1.0f) < 0.5f);
+            bool affine_col = (std::abs(floatMatrix[0][3]) < 0.5f) && (std::abs(floatMatrix[1][3]) < 0.5f) &&
+                              (std::abs(floatMatrix[2][3]) < 0.5f) && (std::abs(floatMatrix[3][3] - 1.0f) < 0.5f);
+            float max_val = 0.0f;
+            for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) {
+                float v = std::abs((float)floatMatrix[i][j]);
+                if (v > max_val) max_val = v;
+            }
+            if (!affine_row && !affine_col && max_val > 100.0f) {
+                static int reject_log = 0;
+                if (++reject_log <= 10) {
+                    fprintf(stderr, "[RSP::matrix MALFORMED #%d] addr=0x%08X max=%.1f m[3]=[%.2f %.2f %.2f %.2f]\n",
+                        reject_log, rdramAddress, (double)max_val,
+                        (double)floatMatrix[3][0], (double)floatMatrix[3][1],
+                        (double)floatMatrix[3][2], (double)floatMatrix[3][3]);
+                }
+                // Diagnostic only: log malformed matrices but don't drop or substitute
+                // (both options tested 2026-05-04 — drop produced NaN tris, substitute-
+                // identity produced huge off-screen coords). Detection is reliable but
+                // the right action depends on understanding what the game intends with
+                // these non-Mtx-format references.
+            }
+        }
         // Debug dump: first few matrix loads with decoded values
         static int mtx_log = 0;
         if (++mtx_log <= 8) {
             fprintf(stderr, "[RSP::matrix #%d] seg=0x%08X phys=0x%08X params=0x%02X\n",
                 mtx_log, address, rdramAddress, params);
-            // Raw 64-byte hex dump of the matrix data at the resolved RDRAM address
-            const uint8_t *raw = state->fromRDRAM(rdramAddress);
-            fprintf(stderr, "  raw bytes:\n");
-            for (int row = 0; row < 4; row++) {
-                fprintf(stderr, "    +%02X:", row * 16);
-                for (int col = 0; col < 16; col++) {
-                    fprintf(stderr, " %02X", raw[row * 16 + col]);
-                }
-                fprintf(stderr, "\n");
-            }
             fprintf(stderr, "  decoded: [%f %f %f %f / %f %f %f %f / %f %f %f %f / %f %f %f %f]\n",
                 (double)floatMatrix[0][0], (double)floatMatrix[0][1], (double)floatMatrix[0][2], (double)floatMatrix[0][3],
                 (double)floatMatrix[1][0], (double)floatMatrix[1][1], (double)floatMatrix[1][2], (double)floatMatrix[1][3],
                 (double)floatMatrix[2][0], (double)floatMatrix[2][1], (double)floatMatrix[2][2], (double)floatMatrix[2][3],
                 (double)floatMatrix[3][0], (double)floatMatrix[3][1], (double)floatMatrix[3][2], (double)floatMatrix[3][3]);
+
         }
 
         // Projection matrix.
