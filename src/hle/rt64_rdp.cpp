@@ -296,6 +296,7 @@ namespace RT64 {
     }
 
     void RDP::setTile(uint8_t tile, uint8_t fmt, uint8_t siz, uint16_t line, uint16_t tmem, uint8_t palette, uint8_t cmt, uint8_t cms, uint8_t maskt, uint8_t masks, uint8_t shiftt, uint8_t shifts) {
+        { static int n = 0; if (++n <= 30) fprintf(stderr, "[RDP::setTile #%d] tile=%u fmt=%u siz=%u line=%u tmem=0x%03X pal=%u\n", n, tile, fmt, siz, line, tmem, palette); }
 #ifdef LOG_TILE_METHODS
         RT64_LOG_PRINTF("RDP::setTile(tile %u, fmt %u, siz %u, line %u, tmem %u, palette %u, cmt %u, cms %u, maskt %u, masks %u, shiftt %u, shifts %u)", tile, fmt, siz, line, tmem, palette, cmt, cms, maskt, masks, shiftt, shifts);
 #endif
@@ -554,6 +555,7 @@ namespace RT64 {
     }
 
     void RDP::loadTile(uint8_t tile, uint16_t uls, uint16_t ult, uint16_t lrs, uint16_t lrt) {
+        { static int n = 0; if (++n <= 30) fprintf(stderr, "[RDP::loadTile #%d] tile=%u uls=%u ult=%u lrs=%u lrt=%u src=0x%08X fmt=%u siz=%u w=%u\n", n, tile, uls, ult, lrs, lrt, texture.address, texture.fmt, texture.siz, texture.width); }
 #ifdef LOG_LOAD_METHODS
         RT64_LOG_PRINTF("RDP::loadTile(tile %u, uls %u, ult %u, lrs %u, lrt %u)", tile, uls, ult, lrs, lrt);
 #endif
@@ -683,6 +685,7 @@ namespace RT64 {
     }
 
     void RDP::loadBlock(uint8_t tile, uint16_t uls, uint16_t ult, uint16_t lrs, uint16_t dxt) {
+        { static int n = 0; if (++n <= 30) fprintf(stderr, "[RDP::loadBlock #%d] tile=%u uls=%u ult=%u lrs=%u dxt=%u src=0x%08X fmt=%u siz=%u\n", n, tile, uls, ult, lrs, dxt, texture.address, texture.fmt, texture.siz); }
 #ifdef LOG_LOAD_METHODS
         RT64_LOG_PRINTF("RDP::loadBlock(tile %u, uls %u, ult %u, lrs %u, dxt %u)", tile, uls, ult, lrs, dxt);
 #endif
