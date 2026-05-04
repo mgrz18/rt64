@@ -1162,6 +1162,21 @@ namespace RT64 {
 
         // Don't draw anything if both tris are being culled.
         const uint32_t &geometryMode = geometryModeStack[geometryModeStackSize - 1];
+
+        // 2026-05-04: log RDP state of every drawn tri to see if SETCOMBINE
+        // ever fires with non-null combiner. Hypothesis: if always 0 or
+        // FCFFFFFFFFFDF6FB null, gsDPSetCombineMode opcodes aren't being
+        // processed by our F3D parser → upstream bug.
+        {
+            static int dt_log = 0;
+            if (++dt_log <= 20) {
+                const auto &cc = state->rdp->colorCombinerStack[state->rdp->colorCombinerStackSize - 1];
+                const auto &om = state->rdp->otherMode;
+                fprintf(stderr, "[drawTri RDPstate #%d] combine=%08X%08X otherL=%08X otherH=%08X cyc=%u shade=%d\n",
+                    dt_log, cc.H, cc.L, om.L, om.H, cycleType,
+                    (geometryMode & 0x4) != 0);
+            }
+        }
         if ((geometryMode & cullBothMask) == cullBothMask) {
             tri_culled++;
             return;

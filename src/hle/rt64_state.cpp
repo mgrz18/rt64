@@ -1479,6 +1479,26 @@ namespace RT64 {
                         if (depthWriteWidth > 0) {
                             depthFb->copyNativeToRAM(&RDRAM[depthFb->addressStart], depthWriteWidth, depthRowStart, std::min(depthRowEnd, depthFb->height));
                         }
+
+                        // 2026-05-04: GE_FORCE_FB_MARKER=1 stamps a 32x32 magenta block
+                        // directly into RDRAM AFTER copyNativeToRAM (which would
+                        // otherwise overwrite the marker). Validates the FB-write path.
+                        if (getenv("GE_FORCE_FB_MARKER") != nullptr) {
+                            uint8_t *p = &RDRAM[colorFb->addressStart];
+                            const uint16_t magenta = 0xF83F;
+                            for (int y = 10; y < 42; y++) {
+                                for (int x = 10; x < 42; x++) {
+                                    uint32_t off = (y * colorWriteWidth + x) * 2;
+                                    p[off ^ 2] = (magenta >> 8) & 0xFF;
+                                    p[(off + 1) ^ 2] = magenta & 0xFF;
+                                }
+                            }
+                            static int marker_log = 0;
+                            if (++marker_log <= 5) {
+                                fprintf(stderr, "[GE_FORCE_FB_MARKER #%d] wrote magenta block at RDRAM[0x%08X..] AFTER copyNativeToRAM\n",
+                                    marker_log, colorFb->addressStart);
+                            }
+                        }
                     }
 
                     pairCursor++;
