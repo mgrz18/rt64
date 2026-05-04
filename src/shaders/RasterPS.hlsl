@@ -56,7 +56,12 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
 #endif
     
     const uint instanceIndex = instanceRenderIndices[gConstants.renderIndex].instanceIndex;
-    const float4 vertexColor = renderFlagSmoothShade(rp.flags) ? vertexSmoothColor : float4(vertexFlatColor.rgb, vertexSmoothColor.a);
+    // 2026-05-04: GE port — vertexSmoothColor often (0,0,0,0) for GE tris.
+    // Force a usable shade so combiner ALPHA = SHADE·T0 + PRIM is non-zero.
+    float4 vertexColor = renderFlagSmoothShade(rp.flags) ? vertexSmoothColor : float4(vertexFlatColor.rgb, vertexSmoothColor.a);
+    if (all(vertexColor.rgb < 0.001f) && vertexColor.a < 0.001f) {
+        vertexColor = float4(0.7f, 0.7f, 0.7f, 1.0f);
+    }
     const ColorCombiner colorCombiner = { rp.ccL, rp.ccH };
     const bool depthClampNear = renderFlagNoN(rp.flags);
     const bool depthDecal = (otherMode.zMode() == ZMODE_DEC);
@@ -122,17 +127,19 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     
     computeLOD(otherMode, instanceRenderIndices[gConstants.renderIndex].rdpTileCount, instanceRDPParams[instanceIndex].primLOD, lodScale, ddxuvx, ddyuvy, tileIndex0, tileIndex1, lodFraction);
 
-    // 2026-05-04: GoldenEye port — early-return for triangles emits gray
-    // shading (depth-derived) bypassing the combiner+blender chain that
-    // otherwise discards every fragment due to GE's alpha pipeline ending
-    // at zero. Re-enable real combiner once textures + shade work.
-    if (!renderFlagRect(rp.flags)) {
-        float depth = saturate(1.0f - vertexPosition.z);
-        float3 base = float3(0.5f + 0.5f * depth, 0.5f + 0.5f * depth, 0.5f + 0.5f * depth);
-        resultColor = float4(base, 1.0f);
-        resultAlpha = float4(base, 1.0f);
-        return true;
-    }
+    // 2026-05-04: GoldenEye port — early-return DISABLED. Now using:
+    // - Forced vertex shade (when zero)
+    // - Forced prim color (when zero)
+    // - Coverage pinned to full for tris
+    // - combinerColor.a max(1)
+    // ...so the full combiner+blender path can produce visible output.
+    // Toggle ON if you need to fall back to monochrome stopgap:
+    // if (!renderFlagRect(rp.flags)) {
+    //     float depth = saturate(1.0f - vertexPosition.z);
+    //     float3 base = float3(0.5f + 0.5f * depth);
+    //     resultColor = float4(base, 1.0f); resultAlpha = float4(base, 1.0f);
+    //     return true;
+    // }
 
     float4 texVal0 = float4(1.0f, 1.0f, 1.0f, 1.0f);
     float4 texVal1 = float4(1.0f, 1.0f, 1.0f, 1.0f);
@@ -175,7 +182,11 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     ccInputs.alphaOnly = false;
     ccInputs.texVal0 = texVal0;
     ccInputs.texVal1 = texVal1;
-    ccInputs.primColor = instanceRDPParams[instanceIndex].primColor;
+    // GE port — force usable primColor when zero so SHADE·T0 + PRIM != 0.
+    float4 cprim = instanceRDPParams[instanceIndex].primColor;
+    if (cprim.a < 0.001f) cprim.a = 1.0f;
+    if (all(cprim.rgb < 0.001f)) cprim.rgb = float3(1.0f, 1.0f, 1.0f);
+    ccInputs.primColor = cprim;
     ccInputs.shadeColor = shadeColor;
     ccInputs.envColor = instanceRDPParams[instanceIndex].envColor;
     ccInputs.keyCenter = instanceRDPParams[instanceIndex].keyCenter;
@@ -225,7 +236,11 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     // Compute coverage estimation.
     const bool usesHDR = renderFlagUsesHDR(rp.flags);
     const float cvgRange = usesHDR ? 65535.0f : 255.0f;
-    float resultCvg = (8.0f / cvgRange) * (otherMode.cvgXAlpha() ? combinerColor.a : 1.0f);
+    // GE port: pin coverage to full for triangles; cvgXAlpha logic kept killing
+    // tris when combiner alpha is small. Rects keep original behavior.
+    float resultCvg = renderFlagRect(rp.flags)
+        ? (8.0f / cvgRange) * (otherMode.cvgXAlpha() ? combinerColor.a : 1.0f)
+        : (8.0f / cvgRange);
 
     // Discard all pixels without coverage.
     const float CoverageThreshold = 1.0f / cvgRange;

@@ -629,6 +629,14 @@ namespace RT64 {
         // We push a new set of lights if a vertex actually uses it.
         const GBI *curGBI = state->ext.interpreter->hleGBI;
         uint32_t &geometryMode = geometryModeStack[geometryModeStackSize - 1];
+        // 2026-05-04: GE_FORCE_SHADE=1 forces G_SHADE bit so vertex colors propagate
+        // to the raster pipeline (RasterPS picks vertexSmoothColor when smoothShade
+        // is set on the render flags, which is derived from geometryMode & G_SHADE).
+        // GoldenEye DLs don't seem to emit G_SETGEOMETRYMODE with G_SHADE in our
+        // current run logs (drawTri RDPstate shows shade=0 always).
+        if (getenv("GE_FORCE_SHADE") != nullptr) {
+            geometryMode |= G_SHADE;
+        }
         const bool usesLighting = (geometryMode & G_LIGHTING);
         const bool usesPointLighting = curGBI->flags.pointLighting && (geometryMode & G_POINT_LIGHTING);
         if (usesLighting) {
@@ -753,8 +761,18 @@ namespace RT64 {
             viewProjIndices.emplace_back(curViewProjIndex);
             worldIndices.emplace_back(curTransformIndex);
             fogIndices.emplace_back(curFogIndex);
-            lightIndices.emplace_back(curLightIndex);
-            lightCounts.emplace_back(curLightCount);
+            // 2026-05-04: GE_RAW_VTX_COLOR=1 forces the compute shader's
+            // "no lighting" branch by zeroing the per-vertex lightCount, so
+            // dstCol comes directly from srcCol (raw vertex rgba). This is a
+            // diagnostic to rule out lights producing zeroed colors.
+            if (getenv("GE_RAW_VTX_COLOR") != nullptr) {
+                lightIndices.emplace_back(0u);
+                lightCounts.emplace_back(0u);
+            }
+            else {
+                lightIndices.emplace_back(curLightIndex);
+                lightCounts.emplace_back(curLightCount);
+            }
             lookAtIndices.emplace_back(curLookAtIndex);
             indices[i] = uint32_t(globalIndex) + (i - dstIndex);
             used[i] = false;
