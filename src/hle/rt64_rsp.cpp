@@ -193,6 +193,16 @@ namespace RT64 {
         if (++mtx_log <= 8) {
             fprintf(stderr, "[RSP::matrix #%d] seg=0x%08X phys=0x%08X params=0x%02X\n",
                 mtx_log, address, rdramAddress, params);
+            // Raw 64-byte hex dump of the matrix data at the resolved RDRAM address
+            const uint8_t *raw = state->fromRDRAM(rdramAddress);
+            fprintf(stderr, "  raw bytes:\n");
+            for (int row = 0; row < 4; row++) {
+                fprintf(stderr, "    +%02X:", row * 16);
+                for (int col = 0; col < 16; col++) {
+                    fprintf(stderr, " %02X", raw[row * 16 + col]);
+                }
+                fprintf(stderr, "\n");
+            }
             fprintf(stderr, "  decoded: [%f %f %f %f / %f %f %f %f / %f %f %f %f / %f %f %f %f]\n",
                 (double)floatMatrix[0][0], (double)floatMatrix[0][1], (double)floatMatrix[0][2], (double)floatMatrix[0][3],
                 (double)floatMatrix[1][0], (double)floatMatrix[1][1], (double)floatMatrix[1][2], (double)floatMatrix[1][3],

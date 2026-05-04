@@ -86,7 +86,12 @@ namespace RT64 {
             // 0xBF=G_TRI1, which is what GoldenEye actually uses.
             GBI_F3D::setup(gbi);
 
-            // The only two GE-specific overrides:
+            // 2026-05-04: REVERTED experimental 0x01→G_DL remap. The decomp
+            // Makefile does NOT define F3DEX_GBI, so gbi.h uses stock F3D defines
+            // (G_MTX=0x01, G_DL=0x06). The asm finding that "0x01 acts like
+            // a DL pointer update" was either a sub-opcode dispatch artifact or
+            // the agent misidentified the handler. Leaving the standard F3D
+            // mappings until we can pin down the exact dispatch table.
             gbi->map[F3DGOLDEN_G_TRIX]     = &triX;               // 0xB1 (was QUAD in F3D)
             gbi->map[F3DGOLDEN_G_MOVEWORD] = &moveWord_BD;        // 0xBD (was POPMTX)
 
