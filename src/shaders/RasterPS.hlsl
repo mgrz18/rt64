@@ -127,6 +127,17 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     
     computeLOD(otherMode, instanceRenderIndices[gConstants.renderIndex].rdpTileCount, instanceRDPParams[instanceIndex].primLOD, lodScale, ddxuvx, ddyuvy, tileIndex0, tileIndex1, lodFraction);
 
+    // 2026-05-05: per-pixel rainbow test — emit RGB from screen position to
+    // verify the pixel shader produces per-pixel variation (vs uniform fills).
+    // If output is rainbow gradient → triangles ARE rasterizing per-pixel.
+    // If still uniform → something upstream forces all pixels to one value.
+    // (Not used in default config; enable by uncommenting the early return.)
+    // if (!renderFlagRect(rp.flags)) {
+    //     resultColor = float4(vertexPosition.x / 320.0f, vertexPosition.y / 240.0f, 0.5f, 1.0f);
+    //     resultAlpha = float4(vertexPosition.x / 320.0f, vertexPosition.y / 240.0f, 0.5f, 1.0f);
+    //     return true;
+    // }
+    //
     // 2026-05-04: GoldenEye port — early-return DISABLED. Now using:
     // - Forced vertex shade (when zero)
     // - Forced prim color (when zero)
