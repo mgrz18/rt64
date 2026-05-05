@@ -629,12 +629,9 @@ namespace RT64 {
         // We push a new set of lights if a vertex actually uses it.
         const GBI *curGBI = state->ext.interpreter->hleGBI;
         uint32_t &geometryMode = geometryModeStack[geometryModeStackSize - 1];
-        // 2026-05-04: force G_SHADE bit by default. GoldenEye doesn't emit
-        // G_SETGEOMETRYMODE with G_SHADE in observed DLs but the combiner
-        // expects shade as input. Without this, vertex colors don't propagate.
-        // Confirmed deterministic visible-scene rendering 4/4 runs with this on.
-        // Disable via GE_NO_FORCE_SHADE=1.
-        if (getenv("GE_NO_FORCE_SHADE") == nullptr) {
+        // 2026-05-04: GE_FORCE_SHADE=1 forces G_SHADE bit so vertex colors
+        // propagate. Required for visible scene rendering in GE.
+        if (getenv("GE_FORCE_SHADE") != nullptr) {
             geometryMode |= G_SHADE;
         }
         const bool usesLighting = (geometryMode & G_LIGHTING);
@@ -761,16 +758,16 @@ namespace RT64 {
             viewProjIndices.emplace_back(curViewProjIndex);
             worldIndices.emplace_back(curTransformIndex);
             fogIndices.emplace_back(curFogIndex);
-            // 2026-05-04: default to "no lighting" so dstCol comes directly
-            // from raw vertex rgba (srcCol). GE's lights aren't reaching us
-            // correctly and would zero out RGB. Disable via GE_USE_LIGHTS=1.
-            if (getenv("GE_USE_LIGHTS") != nullptr) {
-                lightIndices.emplace_back(curLightIndex);
-                lightCounts.emplace_back(curLightCount);
-            }
-            else {
+            // 2026-05-04: GE_RAW_VTX_COLOR=1 forces compute shader to use
+            // raw vertex rgba (no lighting), bypassing GE's lights producing
+            // zero colors.
+            if (getenv("GE_RAW_VTX_COLOR") != nullptr) {
                 lightIndices.emplace_back(0u);
                 lightCounts.emplace_back(0u);
+            }
+            else {
+                lightIndices.emplace_back(curLightIndex);
+                lightCounts.emplace_back(curLightCount);
             }
             lookAtIndices.emplace_back(curLookAtIndex);
             indices[i] = uint32_t(globalIndex) + (i - dstIndex);
