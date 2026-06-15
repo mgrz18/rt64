@@ -2737,6 +2737,18 @@ namespace RT64 {
     }
 
     uint8_t *State::fromRDRAM(uint32_t rdramAddress) const {
+        // Diagnostic + safety: the F3D_Gold "garbage geometry" symptom involves segment/heap
+        // addresses that may resolve out of bounds. Without a check this is an unguarded OOB
+        // read (a likely source of the level-load SIGSEGV/SIGBUS). Log + clamp so we can see the
+        // offending addresses and stop the crash masking the real geometry behaviour.
+        if (rdramAddress >= RDRAMSize) {
+            static int oob_log = 0;
+            if (oob_log++ < 25) {
+                fprintf(stderr, "[fromRDRAM OOB] addr=0x%08X >= RDRAMSize=0x%X\n",
+                    rdramAddress, (unsigned int)RDRAMSize);
+            }
+            return &RDRAM[rdramAddress % RDRAMSize];
+        }
         return &RDRAM[rdramAddress];
     }
 
